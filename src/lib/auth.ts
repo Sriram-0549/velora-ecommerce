@@ -252,8 +252,9 @@ export function isUserAdmin(user: { email?: string; app_metadata?: Record<string
  */
 export async function checkAdminAuth(request: Request | { headers?: Headers | { get(name: string): string | null } }): Promise<boolean> {
   try {
-    // 1. Check dedicated admin token from Authorization header or cookie
     const token = extractTokenFromRequest(request);
+
+    // 1. Check dedicated admin token from Authorization header or cookie
     if (token) {
       const session = await verifySessionToken(token);
       if (session !== null) return true;
@@ -263,7 +264,10 @@ export async function checkAdminAuth(request: Request | { headers?: Headers | { 
     try {
       const { createClient } = await import("@/lib/supabase/server");
       const supabase = await createClient();
-      const { data: { user }, error } = await supabase.auth.getUser();
+      const { data: { user }, error } = token
+        ? await supabase.auth.getUser(token)
+        : await supabase.auth.getUser();
+
       if (!error && user && isUserAdmin(user)) {
         return true;
       }
@@ -285,24 +289,59 @@ export interface AuthContext {
 
 /**
  * Returns current authenticated user and admin status for route handlers.
+ * 1. Validates custom admin JWT token first.
+ * 2. If Bearer token is provided and not an admin token, validates via Supabase Auth (getUser(token)).
+ * 3. Fallbacks to server cookie authentication for browser navigation.
  */
 export async function getAuthContext(request?: Request): Promise<AuthContext> {
   let hasAdminToken = false;
+  let bearerToken: string | null = null;
+
   if (request) {
-    const token = extractTokenFromRequest(request);
-    if (token) {
-      const session = await verifySessionToken(token);
-      if (session) hasAdminToken = true;
+    bearerToken = extractTokenFromRequest(request);
+    if (bearerToken) {
+      const session = await verifySessionToken(bearerToken);
+      if (session) {
+        hasAdminToken = true;
+      }
     }
   }
 
+  // 1. Valid admin session token (custom HMAC-SHA256 JWT)
+  if (hasAdminToken) {
+    return {
+      user: { id: "admin-env", email: process.env.ADMIN_EMAIL || "admin@velora.com", role: "admin" },
+      isAdmin: true,
+    };
+  }
+
+  // 2. If a Bearer token was provided, validate it against Supabase Auth
+  if (bearerToken) {
+    try {
+      const { createClient } = await import("@/lib/supabase/server");
+      const supabase = await createClient();
+      const { data: { user }, error } = await supabase.auth.getUser(bearerToken);
+
+      if (!error && user) {
+        const admin = isUserAdmin(user);
+        return {
+          user: { id: user.id, email: user.email, role: admin ? "admin" : "customer" },
+          isAdmin: admin,
+        };
+      }
+    } catch (err) {
+      console.error("Error validating bearer token with Supabase in getAuthContext:", err);
+    }
+  }
+
+  // 3. Fallback to Supabase server cookies (for browser sessions)
   try {
     const { createClient } = await import("@/lib/supabase/server");
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
 
     if (!error && user) {
-      const admin = hasAdminToken || isUserAdmin(user);
+      const admin = isUserAdmin(user);
       return {
         user: { id: user.id, email: user.email, role: admin ? "admin" : "customer" },
         isAdmin: admin,
@@ -310,13 +349,6 @@ export async function getAuthContext(request?: Request): Promise<AuthContext> {
     }
   } catch {
     // Server client unable to read cookies in this context
-  }
-
-  if (hasAdminToken) {
-    return {
-      user: { id: "admin-env", email: process.env.ADMIN_EMAIL || "admin@velora.com", role: "admin" },
-      isAdmin: true,
-    };
   }
 
   return { user: null, isAdmin: false };
