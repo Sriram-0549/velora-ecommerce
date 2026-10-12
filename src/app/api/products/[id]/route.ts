@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { supabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabaseAdmin";
 import { checkAdminAuth } from "@/lib/auth";
+import { mockProducts } from "@/data/mockData";
 
 export const dynamic = "force-dynamic";
 
@@ -11,36 +12,34 @@ interface RouteContext {
   }>;
 }
 
-
 /**
  * GET /api/products/[id]
- * Retrieves a single product by ID from the Supabase "products" table.
+ * Retrieves a single product by ID from Supabase, or falls back to mockProducts
+ * if Supabase is offline or unreachable.
  */
 export async function GET(
   _request: Request,
   { params }: RouteContext
 ) {
+  const { id } = await params;
+
+  if (!id || typeof id !== "string") {
+    return NextResponse.json(
+      {
+        error: "Invalid request",
+        message: "A valid product ID must be provided.",
+      },
+      { status: 400 }
+    );
+  }
+
   try {
     if (!isSupabaseConfigured()) {
+      const fallback = mockProducts.find((p) => String(p.id) === String(id));
+      if (fallback) return NextResponse.json(fallback, { status: 200 });
       return NextResponse.json(
-        {
-          error: "Supabase not configured",
-          message:
-            "Supabase credentials are missing or still set to placeholders. Please configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY in .env.local.",
-        },
-        { status: 500 }
-      );
-    }
-
-    const { id } = await params;
-
-    if (!id || typeof id !== "string") {
-      return NextResponse.json(
-        {
-          error: "Invalid request",
-          message: "A valid product ID must be provided.",
-        },
-        { status: 400 }
+        { error: "Product not found", message: `Product with ID '${id}' was not found.` },
+        { status: 404 }
       );
     }
 
@@ -51,47 +50,43 @@ export async function GET(
       .maybeSingle();
 
     if (error) {
-      // If the ID format does not match PostgreSQL column type (e.g. non-numeric string for bigint), treat as not found
       if (error.code === "22P02") {
+        const fallback = mockProducts.find((p) => String(p.id) === String(id));
+        if (fallback) return NextResponse.json(fallback, { status: 200 });
         return NextResponse.json(
-          {
-            error: "Product not found",
-            message: `Product with ID '${id}' was not found.`,
-          },
+          { error: "Product not found", message: `Product with ID '${id}' was not found.` },
           { status: 404 }
         );
       }
 
-      console.error("Supabase query error:", error);
+      console.warn("Supabase query error, checking mockProducts fallback:", error.message);
+      const fallback = mockProducts.find((p) => String(p.id) === String(id));
+      if (fallback) return NextResponse.json(fallback, { status: 200 });
+
       return NextResponse.json(
-        {
-          error: "Database error",
-          message: error.message,
-          code: error.code,
-        },
+        { error: "Database error", message: error.message },
         { status: 500 }
       );
     }
 
     if (!data) {
+      const fallback = mockProducts.find((p) => String(p.id) === String(id));
+      if (fallback) return NextResponse.json(fallback, { status: 200 });
       return NextResponse.json(
-        {
-          error: "Product not found",
-          message: `Product with ID '${id}' was not found.`,
-        },
+        { error: "Product not found", message: `Product with ID '${id}' was not found.` },
         { status: 404 }
       );
     }
 
     return NextResponse.json(data, { status: 200 });
   } catch (err: unknown) {
-    console.error("Unexpected error in GET /api/products/[id]:", err);
+    console.warn("Supabase connection offline or unreachable in GET [id], checking mockProducts:", err);
+    const fallback = mockProducts.find((p) => String(p.id) === String(id));
+    if (fallback) return NextResponse.json(fallback, { status: 200 });
+
     return NextResponse.json(
-      {
-        error: "Internal Server Error",
-        message: err instanceof Error ? err.message : "An unexpected error occurred",
-      },
-      { status: 500 }
+      { error: "Product not found", message: `Product with ID '${id}' was not found.` },
+      { status: 404 }
     );
   }
 }

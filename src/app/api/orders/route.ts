@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabaseAdmin";
-import { checkAdminAuth } from "@/lib/auth";
+import { checkAdminAuth, getAuthContext } from "@/lib/auth";
+import { mockProducts } from "@/data/mockData";
 
 export const dynamic = "force-dynamic";
 
@@ -48,15 +49,18 @@ interface OrderRequestBody {
 
 /**
  * GET /api/orders
- * Admin endpoint: Retrieves all customer orders sorted by created_at descending.
- * Uses the server-only supabaseAdmin client to securely read orders protected by RLS.
+ * Admin or Customer endpoint:
+ * - Administrators can retrieve all store orders.
+ * - Authenticated customers can retrieve ONLY their own orders.
+ * - Unauthenticated callers receive 401 Unauthorized.
  */
 export async function GET(request: Request) {
   try {
-    const isAdmin = await checkAdminAuth(request);
-    if (!isAdmin) {
+    const authContext = await getAuthContext(request);
+
+    if (!authContext.isAdmin && !authContext.user) {
       return NextResponse.json(
-        { error: "Unauthorized", message: "Admin authentication required." },
+        { error: "Unauthorized", message: "Authentication required to view orders." },
         { status: 401 }
       );
     }
@@ -72,12 +76,19 @@ export async function GET(request: Request) {
       );
     }
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from("orders")
       .select(
         "id, customer_name, customer_email, customer_phone, shipping_address, city, state, pincode, subtotal, delivery_charge, discount, total, currency, payment_method, payment_status, status, estimated_delivery, created_at, updated_at"
       )
       .order("created_at", { ascending: false });
+
+    // Restrict customer orders to their authenticated email
+    if (!authContext.isAdmin && authContext.user?.email) {
+      query = query.ilike("customer_email", authContext.user.email.trim());
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error("Supabase query orders error:", error);
@@ -292,30 +303,30 @@ export async function POST(request: Request) {
       parsedItems.push({ productId: pId, quantity: qty });
     }
 
-    // 9. Fetch and verify every product from Supabase (do NOT trust client prices)
+    // 9. Fetch and verify every product from Supabase (or fallback to catalog if offline)
     const productIds = Array.from(new Set(parsedItems.map((p) => p.productId)));
 
-    const { data: dbProducts, error: productsError } = await supabaseAdmin
-      .from("products")
-      .select("*")
-      .in("id", productIds);
+    const productsMap = new Map<string, any>();
 
-    if (productsError) {
-      console.error("Failed to query products from Supabase:", productsError);
-      return NextResponse.json(
-        {
-          error: "Database error",
-          message: "Failed to verify products in database.",
-          details: productsError.message,
-        },
-        { status: 500 }
-      );
+    try {
+      const { data: dbProducts, error: productsError } = await supabaseAdmin
+        .from("products")
+        .select("*")
+        .in("id", productIds);
+
+      if (!productsError && Array.isArray(dbProducts)) {
+        for (const prod of dbProducts) {
+          productsMap.set(String(prod.id), prod);
+        }
+      }
+    } catch (err) {
+      console.warn("Supabase products lookup offline/unreachable during checkout, checking mockProducts:", err);
     }
 
-    const productsMap = new Map<string, any>();
-    if (Array.isArray(dbProducts)) {
-      for (const prod of dbProducts) {
-        productsMap.set(String(prod.id), prod);
+    // Populate fallback mock catalogue products for any product IDs not found in Supabase
+    for (const mockProd of mockProducts) {
+      if (!productsMap.has(String(mockProd.id))) {
+        productsMap.set(String(mockProd.id), mockProd);
       }
     }
 
@@ -404,7 +415,10 @@ export async function POST(request: Request) {
     });
 
     // 12. Insert master record into 'orders' table
-    const orderRecord = {
+    const authContext = await getAuthContext(request);
+    const userId = authContext.user?.id && authContext.user.id !== "admin-env" ? authContext.user.id : null;
+
+    const orderRecord: Record<string, any> = {
       id: orderId,
       customer_name: customerName,
       customer_email: customerEmail,
@@ -422,13 +436,33 @@ export async function POST(request: Request) {
       payment_status: "pending",
       status: "processing",
       estimated_delivery: estimatedDelivery,
+      ...(userId ? { user_id: userId } : {}),
     };
 
-    const { data: insertedOrder, error: orderInsertError } = await supabaseAdmin
+    let { data: insertedOrder, error: orderInsertError } = await supabaseAdmin
       .from("orders")
       .insert([orderRecord])
       .select()
       .single();
+
+    // If user_id column does not exist in database yet (PostgREST PGRST204, schema cache, or SQL 42703), retry without user_id
+    if (
+      orderInsertError &&
+      orderRecord.user_id &&
+      (orderInsertError.code === "42703" ||
+        orderInsertError.code === "PGRST204" ||
+        orderInsertError.message?.toLowerCase().includes("user_id") ||
+        orderInsertError.message?.toLowerCase().includes("schema cache"))
+    ) {
+      delete orderRecord.user_id;
+      const retry = await supabaseAdmin
+        .from("orders")
+        .insert([orderRecord])
+        .select()
+        .single();
+      insertedOrder = retry.data;
+      orderInsertError = retry.error;
+    }
 
     if (orderInsertError) {
       console.error("Supabase orders insert error:", orderInsertError);

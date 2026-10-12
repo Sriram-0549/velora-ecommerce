@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabaseAdmin";
-import { checkAdminAuth } from "@/lib/auth";
+import { checkAdminAuth, getAuthContext } from "@/lib/auth";
 import { OrderStatus } from "@/types";
 
 export const dynamic = "force-dynamic";
@@ -21,18 +21,20 @@ const ALLOWED_STATUSES: OrderStatus[] = [
 
 /**
  * GET /api/orders/[id]
- * Admin endpoint: Retrieves a single customer order and all its associated line items.
- * Uses the server-only supabaseAdmin client to securely bypass RLS.
+ * Retrieves a single customer order and all its associated line items.
+ * Authorized for:
+ * 1. Admin users (can view any order)
+ * 2. Authenticated customers (can ONLY view orders they own)
  */
 export async function GET(
   request: Request,
   { params }: RouteContext
 ) {
   try {
-    const isAdmin = await checkAdminAuth(request);
-    if (!isAdmin) {
+    const authContext = await getAuthContext(request);
+    if (!authContext.isAdmin && !authContext.user) {
       return NextResponse.json(
-        { error: "Unauthorized", message: "Admin authentication required." },
+        { error: "Unauthorized", message: "Authentication required." },
         { status: 401 }
       );
     }
@@ -87,6 +89,22 @@ export async function GET(
         },
         { status: 404 }
       );
+    }
+
+    // Enforce ownership if caller is not an administrator
+    if (!authContext.isAdmin) {
+      const orderEmail = order.customer_email?.trim().toLowerCase();
+      const userEmail = authContext.user?.email?.trim().toLowerCase();
+      const isOwner =
+        (userEmail && orderEmail === userEmail) ||
+        (authContext.user?.id && order.user_id && order.user_id === authContext.user.id);
+
+      if (!isOwner) {
+        return NextResponse.json(
+          { error: "Forbidden", message: "You do not have authorization to view this order." },
+          { status: 403 }
+        );
+      }
     }
 
     // 2. Fetch associated line items

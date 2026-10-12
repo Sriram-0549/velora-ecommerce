@@ -55,6 +55,26 @@ export default function CheckoutPage() {
     }
   }, [isInitialized, items.length, router]);
 
+  // If customer is signed in, prefill name and email from Supabase Auth
+  useEffect(() => {
+    let isMounted = true;
+    import("@/lib/supabase/client").then(({ createClient }) => {
+      const supabase = createClient();
+      supabase.auth.getUser().then(({ data: { user } }) => {
+        if (isMounted && user) {
+          setFormData((prev) => ({
+            ...prev,
+            email: prev.email || user.email || "",
+            name: prev.name || user.user_metadata?.full_name || "",
+          }));
+        }
+      });
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const validate = (): boolean => {
     const newErrors: FormErrors = {};
 

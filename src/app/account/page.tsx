@@ -1,21 +1,31 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { Order } from "@/types";
+import type { User } from "@supabase/supabase-js";
+import { Order, AdminOrder } from "@/types";
 import { formatPrice } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
 
 export default function AccountPage() {
+  const [supabase] = useState(() => createClient());
+
   const [activeAuthTab, setActiveAuthTab] = useState<"signin" | "register">("signin");
   const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  // Form states for demo customer auth
+  // Authenticated user state
+  const [user, setUser] = useState<User | null>(null);
+  const [userOrders, setUserOrders] = useState<AdminOrder[]>([]);
+
+  // Form states for customer auth
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
 
-  // Order lookup state
+  // Order lookup state (Guest track)
   const [lookupOrderId, setLookupOrderId] = useState("");
   const [lookupResult, setLookupResult] = useState<Order | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -23,6 +33,27 @@ export default function AccountPage() {
   // Saved order in localStorage
   const [savedOrder, setSavedOrder] = useState<Order | null>(null);
 
+  // Fetch orders for current authenticated user
+  const fetchUserOrders = useCallback(async () => {
+    try {
+      const res = await fetch("/api/orders", {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setUserOrders(data);
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to fetch customer orders:", err);
+    }
+  }, []);
+
+  // Initialize auth state and listen for session changes
   useEffect(() => {
     try {
       const stored = localStorage.getItem("velora_latest_order");
@@ -32,20 +63,131 @@ export default function AccountPage() {
     } catch {
       // ignore
     }
-  }, []);
 
-  const handleSignIn = (e: React.FormEvent) => {
+    const initAuth = async () => {
+      try {
+        const {
+          data: { user: currentUser },
+        } = await supabase.auth.getUser();
+
+        setUser(currentUser);
+        if (currentUser) {
+          fetchUserOrders();
+        }
+      } catch (err) {
+        console.warn("Supabase auth check notice:", err);
+      }
+    };
+
+    initAuth();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchUserOrders();
+      } else {
+        setUserOrders([]);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [supabase, fetchUserOrders]);
+
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !password.trim()) return;
-    setAuthSuccessMsg(`Welcome back to VELORA, ${email.split("@")[0]}! Customer portal active.`);
-    setTimeout(() => setAuthSuccessMsg(null), 5000);
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+
+    if (!email.trim() || !password.trim()) {
+      setAuthError("Please enter your email and password.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+
+      if (error) {
+        setAuthError(error.message);
+        return;
+      }
+
+      setUser(data.user);
+      setAuthSuccessMsg(`Welcome back to VELORA, ${data.user.email?.split("@")[0]}! Customer portal active.`);
+      setPassword("");
+      fetchUserOrders();
+      setTimeout(() => setAuthSuccessMsg(null), 6000);
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : "Sign in failed");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !email.trim() || !password.trim()) return;
-    setAuthSuccessMsg(`Account created for ${name}! Welcome to the VELORA membership.`);
-    setTimeout(() => setAuthSuccessMsg(null), 5000);
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+
+    if (!name.trim() || !email.trim() || !password.trim()) {
+      setAuthError("All fields are required.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: {
+            full_name: name.trim(),
+          },
+        },
+      });
+
+      if (error) {
+        setAuthError(error.message);
+        return;
+      }
+
+      if (data.session) {
+        setUser(data.user);
+        setAuthSuccessMsg(`Account created for ${name}! Welcome to the VELORA membership.`);
+      } else {
+        setAuthSuccessMsg(
+          `Registration initiated for ${name}! If confirmation is enabled, please verify your email.`
+        );
+      }
+      setPassword("");
+      setTimeout(() => setAuthSuccessMsg(null), 6000);
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : "Registration failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setLoading(true);
+    try {
+      await supabase.auth.signOut();
+      setUser(null);
+      setUserOrders([]);
+      setAuthSuccessMsg("You have signed out of your account.");
+      setTimeout(() => setAuthSuccessMsg(null), 4000);
+    } catch (err: unknown) {
+      console.error("Sign out error:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleOrderLookup = (e: React.FormEvent) => {
@@ -65,13 +207,57 @@ export default function AccountPage() {
       return;
     }
 
+    // Check fetched user orders if available
+    const matchedUserOrder = userOrders.find((o) =>
+      o.id.toLowerCase().includes(query.toLowerCase())
+    );
+    if (matchedUserOrder) {
+      setLookupResult({
+        id: matchedUserOrder.id,
+        customer: {
+          name: matchedUserOrder.customer_name,
+          email: matchedUserOrder.customer_email,
+          phone: matchedUserOrder.customer_phone,
+          address: matchedUserOrder.shipping_address,
+          city: matchedUserOrder.city,
+          state: matchedUserOrder.state,
+          pincode: matchedUserOrder.pincode,
+        },
+        items: (matchedUserOrder.items || []).map((it) => ({
+          product: {
+            id: String(it.product_id),
+            name: it.product_name,
+            description: "",
+            price: it.product_price,
+            currency: "INR",
+            category: "Men",
+            image: it.product_image || "",
+            imageUrl: it.product_image || "",
+            rating: 5,
+            reviewCount: 1,
+            stock: 10,
+            inStock: true,
+          },
+          quantity: it.quantity,
+        })),
+        subtotal: matchedUserOrder.subtotal,
+        deliveryCharge: matchedUserOrder.delivery_charge,
+        discount: matchedUserOrder.discount,
+        total: matchedUserOrder.total,
+        paymentMethod: (matchedUserOrder.payment_method as any) || "cod",
+        placedAt: matchedUserOrder.created_at,
+        estimatedDelivery: matchedUserOrder.estimated_delivery || "3-5 Business Days",
+      });
+      return;
+    }
+
     // Otherwise generate realistic simulated lookup response matching VELORA orders
     if (query.toUpperCase().startsWith("VEL-") || query.length >= 6) {
       setLookupResult({
         id: query.toUpperCase().startsWith("VEL-") ? query.toUpperCase() : `VEL-${query.slice(0, 6)}`,
         customer: {
           name: "Verified Customer",
-          email: "customer@example.com",
+          email: user?.email || "customer@example.com",
           phone: "+91 98765 43210",
           address: "124 Horizon Avenue, Apt 4B",
           city: "Mumbai",
@@ -132,7 +318,7 @@ export default function AccountPage() {
                   Client Concierge
                 </span>
                 <span className="rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[10px] font-bold text-slate-600">
-                  Guest Shopper
+                  {user ? "Authenticated Member" : "Guest Shopper"}
                 </span>
               </div>
               <h1 className="mt-2 text-2xl sm:text-3xl lg:text-4xl font-black tracking-tight text-[#111827]">
@@ -172,6 +358,16 @@ export default function AccountPage() {
           </div>
         )}
 
+        {/* Error Alert */}
+        {authError && (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-xs font-medium text-red-700 shadow-sm animate-fadeIn flex items-center gap-3">
+            <svg className="h-4 w-4 shrink-0 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>{authError}</span>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left Column (5 Cols): Customer Auth / Membership Portal */}
           <div className="lg:col-span-5 space-y-6">
@@ -188,139 +384,192 @@ export default function AccountPage() {
                     />
                   </svg>
                 </div>
-                <div>
-                  <h2 className="text-base font-black text-[#111827]">Member Access</h2>
-                  <p className="text-xs text-slate-500">
-                    Sign in to sync your bag, track delivery status, and access private capsule drops.
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-base font-black text-[#111827]">
+                    {user ? "Member Portal" : "Member Access"}
+                  </h2>
+                  <p className="text-xs text-slate-500 truncate">
+                    {user
+                      ? `Signed in as ${user.email}`
+                      : "Sign in to sync your bag, track delivery status, and access private capsule drops."}
                   </p>
                 </div>
               </div>
 
-              {/* Tabs: Sign In / Create Account */}
-              <div className="mt-6 flex rounded-xl bg-slate-100 p-1">
-                <button
-                  type="button"
-                  onClick={() => setActiveAuthTab("signin")}
-                  className={`flex-1 py-2 text-xs font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer ${
-                    activeAuthTab === "signin"
-                      ? "bg-white text-[#111827] shadow-xs"
-                      : "text-slate-600 hover:text-blue-600"
-                  }`}
-                >
-                  Sign In
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveAuthTab("register")}
-                  className={`flex-1 py-2 text-xs font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer ${
-                    activeAuthTab === "register"
-                      ? "bg-white text-[#111827] shadow-xs"
-                      : "text-slate-600 hover:text-blue-600"
-                  }`}
-                >
-                  Create Account
-                </button>
-              </div>
-
-              {/* Sign In Form */}
-              {activeAuthTab === "signin" ? (
-                <form onSubmit={handleSignIn} className="mt-6 space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Email Address
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com"
-                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
-                    />
-                  </div>
-
-                  <div>
+              {/* If user is signed in: show profile info & logout */}
+              {user ? (
+                <div className="mt-6 space-y-4">
+                  <div className="rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-2">
                     <div className="flex items-center justify-between">
-                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                        Password
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => alert("Password reset link has been dispatched to your email address.")}
-                        className="text-[11px] font-semibold text-blue-600 hover:underline cursor-pointer"
-                      >
-                        Forgot?
-                      </button>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        Account Status
+                      </span>
+                      <span className="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[10px] font-bold">
+                        Active Supabase Session
+                      </span>
                     </div>
-                    <input
-                      type="password"
-                      required
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••••••"
-                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
-                    />
+                    <div>
+                      <span className="text-[11px] text-slate-500">Email:</span>
+                      <p className="text-xs font-bold text-[#111827]">{user.email}</p>
+                    </div>
+                    {user.user_metadata?.full_name && (
+                      <div>
+                        <span className="text-[11px] text-slate-500">Name:</span>
+                        <p className="text-xs font-bold text-[#111827]">{user.user_metadata.full_name}</p>
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-[11px] text-slate-500">User ID:</span>
+                      <p className="font-mono text-[10px] text-slate-600 truncate">{user.id}</p>
+                    </div>
                   </div>
 
                   <button
-                    type="submit"
-                    className="w-full mt-2 rounded-xl bg-blue-600 py-3 text-xs font-bold uppercase tracking-wider text-white shadow-sm hover:bg-blue-700 cursor-pointer transition-colors"
+                    type="button"
+                    onClick={handleSignOut}
+                    disabled={loading}
+                    className="w-full rounded-xl border border-red-200 bg-red-50 py-2.5 text-xs font-bold uppercase tracking-wider text-red-700 hover:bg-red-100 cursor-pointer transition-colors"
                   >
-                    Sign In
+                    {loading ? "Signing Out..." : "Sign Out"}
                   </button>
-                </form>
+                </div>
               ) : (
-                /* Register Form */
-                <form onSubmit={handleRegister} className="mt-6 space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Full Name
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder="e.g. Alex Morgan"
-                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
-                    />
+                <>
+                  {/* Tabs: Sign In / Create Account */}
+                  <div className="mt-6 flex rounded-xl bg-slate-100 p-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveAuthTab("signin");
+                        setAuthError(null);
+                      }}
+                      className={`flex-1 py-2 text-xs font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer ${
+                        activeAuthTab === "signin"
+                          ? "bg-white text-[#111827] shadow-xs"
+                          : "text-slate-600 hover:text-blue-600"
+                      }`}
+                    >
+                      Sign In
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveAuthTab("register");
+                        setAuthError(null);
+                      }}
+                      className={`flex-1 py-2 text-xs font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer ${
+                        activeAuthTab === "register"
+                          ? "bg-white text-[#111827] shadow-xs"
+                          : "text-slate-600 hover:text-blue-600"
+                      }`}
+                    >
+                      Create Account
+                    </button>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Email Address
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com"
-                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
-                    />
-                  </div>
+                  {/* Sign In Form */}
+                  {activeAuthTab === "signin" ? (
+                    <form onSubmit={handleSignIn} className="mt-6 space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                          Email Address
+                        </label>
+                        <input
+                          type="email"
+                          required
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
+                        />
+                      </div>
 
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="Create a strong password"
-                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
-                    />
-                  </div>
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                            Password
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => alert("Password reset link has been dispatched to your email address.")}
+                            className="text-[11px] font-semibold text-blue-600 hover:underline cursor-pointer"
+                          >
+                            Forgot?
+                          </button>
+                        </div>
+                        <input
+                          type="password"
+                          required
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          placeholder="••••••••••••"
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
+                        />
+                      </div>
 
-                  <button
-                    type="submit"
-                    className="w-full mt-2 rounded-xl bg-blue-600 py-3 text-xs font-bold uppercase tracking-wider text-white shadow-sm hover:bg-blue-700 cursor-pointer transition-colors"
-                  >
-                    Create Account
-                  </button>
-                </form>
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full mt-2 rounded-xl bg-blue-600 py-3 text-xs font-bold uppercase tracking-wider text-white shadow-sm hover:bg-blue-700 disabled:opacity-50 cursor-pointer transition-colors"
+                      >
+                        {loading ? "Authenticating..." : "Sign In"}
+                      </button>
+                    </form>
+                  ) : (
+                    /* Register Form */
+                    <form onSubmit={handleRegister} className="mt-6 space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                          Full Name
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          placeholder="e.g. Alex Morgan"
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                          Email Address
+                        </label>
+                        <input
+                          type="email"
+                          required
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                          Password
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          placeholder="Create a strong password"
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs text-[#111827] outline-none transition-all placeholder:text-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full mt-2 rounded-xl bg-blue-600 py-3 text-xs font-bold uppercase tracking-wider text-white shadow-sm hover:bg-blue-700 disabled:opacity-50 cursor-pointer transition-colors"
+                      >
+                        {loading ? "Creating Account..." : "Create Account"}
+                      </button>
+                    </form>
+                  )}
+                </>
               )}
             </div>
 
@@ -371,16 +620,47 @@ export default function AccountPage() {
                   <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
                     Fulfillment Status
                   </span>
-                  <h2 className="text-lg font-black text-[#111827]">Recent Orders</h2>
+                  <h2 className="text-lg font-black text-[#111827]">
+                    {user ? "Your Orders" : "Recent Orders"}
+                  </h2>
                 </div>
-                {activeDisplayOrder && (
+                {(activeDisplayOrder || userOrders.length > 0) && (
                   <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700">
-                    Active Order Found
+                    {userOrders.length > 0 ? `${userOrders.length} Order(s) Found` : "Active Order Found"}
                   </span>
                 )}
               </div>
 
-              {activeDisplayOrder ? (
+              {/* If user has real orders from database */}
+              {userOrders.length > 0 ? (
+                <div className="mt-6 space-y-4">
+                  {userOrders.map((ord) => (
+                    <div key={ord.id} className="rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-200/60 pb-3">
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+                            Order Reference
+                          </span>
+                          <p className="font-mono font-bold text-sm text-[#111827]">{ord.id}</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-bold text-emerald-700 capitalize">
+                            {ord.status}
+                          </span>
+                          <p className="font-bold text-sm text-[#111827]">
+                            {formatPrice(ord.total, "INR")}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between text-[11px] text-slate-500 gap-1">
+                        <span>Placed on: {new Date(ord.created_at).toLocaleDateString()}</span>
+                        <span>Estimated: <strong className="text-[#111827]">{ord.estimated_delivery || "3-5 Business Days"}</strong></span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : activeDisplayOrder ? (
                 <div className="mt-6 space-y-6">
                   {/* Order Meta Bar */}
                   <div className="rounded-xl bg-slate-50 border border-slate-200 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">

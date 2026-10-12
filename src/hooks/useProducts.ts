@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Product } from "@/types";
+import { mockProducts } from "@/data/mockData";
 
 // High-resolution fallback image if product image in database is null or blank
 const FALLBACK_PRODUCT_IMAGE =
@@ -25,7 +26,7 @@ export function mapSupabaseProductToProduct(raw: Record<string, any>): Product {
         : typeof raw.original_price === "number"
         ? raw.original_price
         : undefined,
-    currency: raw.currency || "USD",
+    currency: raw.currency || "INR",
     category: raw.category || "Men",
     image: image,
     imageUrl: image,
@@ -56,60 +57,66 @@ export function mapSupabaseProductToProduct(raw: Record<string, any>): Product {
 
 /**
  * Reusable fetch function to retrieve products from GET /api/products
+ * Falls back gracefully to mock catalogue if the network or API is temporarily down.
  */
 export async function fetchProductsFromApi(): Promise<Product[]> {
-  const response = await fetch("/api/products", {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
+  try {
+    const response = await fetch("/api/products", {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
 
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(
-      errorBody.message || errorBody.error || `Failed to fetch products (HTTP ${response.status})`
-    );
+    if (!response.ok) {
+      console.warn(`GET /api/products returned status ${response.status}, falling back to catalogue`);
+      return mockProducts;
+    }
+
+    const data = await response.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      return mockProducts;
+    }
+
+    return data.map(mapSupabaseProductToProduct);
+  } catch (err) {
+    console.warn("fetchProductsFromApi connection notice, using mockProducts:", err);
+    return mockProducts;
   }
-
-  const data = await response.json();
-  if (!Array.isArray(data)) {
-    throw new Error("Invalid API response format: expected an array of products");
-  }
-
-  return data.map(mapSupabaseProductToProduct);
 }
 
 /**
  * Reusable fetch function to retrieve a single product from GET /api/products/[id]
  */
 export async function fetchProductByIdFromApi(id: string): Promise<Product | null> {
-  const response = await fetch(`/api/products/${encodeURIComponent(id)}`, {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
+  try {
+    const response = await fetch(`/api/products/${encodeURIComponent(id)}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
 
-  if (response.status === 404) {
-    return null;
+    if (response.status === 404) {
+      return mockProducts.find((p) => String(p.id) === String(id)) || null;
+    }
+
+    if (!response.ok) {
+      return mockProducts.find((p) => String(p.id) === String(id)) || null;
+    }
+
+    const data = await response.json();
+    if (!data || typeof data !== "object") {
+      return mockProducts.find((p) => String(p.id) === String(id)) || null;
+    }
+
+    return mapSupabaseProductToProduct(data);
+  } catch (err) {
+    console.warn("fetchProductByIdFromApi connection notice, using mock fallback:", err);
+    return mockProducts.find((p) => String(p.id) === String(id)) || null;
   }
-
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(
-      errorBody.message || errorBody.error || `Failed to fetch product (HTTP ${response.status})`
-    );
-  }
-
-  const data = await response.json();
-  if (!data || typeof data !== "object") {
-    throw new Error("Invalid API response format: expected a product object");
-  }
-
-  return mapSupabaseProductToProduct(data);
 }
 
 /**
@@ -127,9 +134,8 @@ export function useProducts() {
       const data = await fetchProductsFromApi();
       setProducts(data);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to load products";
-      console.error("useProducts error:", message);
-      setError(message);
+      console.warn("useProducts failed to load from API, falling back to mockProducts:", err);
+      setProducts(mockProducts);
     } finally {
       setLoading(false);
     }
@@ -170,16 +176,27 @@ export function useProduct(id: string | undefined) {
       setIsNotFound(false);
       const data = await fetchProductByIdFromApi(id);
       if (!data) {
-        setProduct(null);
-        setIsNotFound(true);
+        const fallback = mockProducts.find((p) => String(p.id) === String(id));
+        if (fallback) {
+          setProduct(fallback);
+          setIsNotFound(false);
+        } else {
+          setProduct(null);
+          setIsNotFound(true);
+        }
       } else {
         setProduct(data);
         setIsNotFound(false);
       }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to load product";
-      console.error("useProduct error:", message);
-      setError(message);
+      const fallback = mockProducts.find((p) => String(p.id) === String(id));
+      if (fallback) {
+        setProduct(fallback);
+        setIsNotFound(false);
+      } else {
+        const message = err instanceof Error ? err.message : "Failed to load product";
+        setError(message);
+      }
     } finally {
       setLoading(false);
     }

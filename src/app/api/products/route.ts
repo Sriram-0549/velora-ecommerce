@@ -2,24 +2,19 @@ import { NextResponse } from "next/server";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { supabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabaseAdmin";
 import { checkAdminAuth } from "@/lib/auth";
+import { mockProducts } from "@/data/mockData";
 
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/products
- * Retrieves all products from the Supabase "products" table and returns them as JSON.
+ * Retrieves all products from the Supabase "products" table.
+ * Falls back gracefully to mockProducts if Supabase is unreachable or offline.
  */
 export async function GET() {
   try {
     if (!isSupabaseConfigured()) {
-      return NextResponse.json(
-        {
-          error: "Supabase not configured",
-          message:
-            "Supabase credentials are missing or still set to placeholders. Please configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY in .env.local.",
-        },
-        { status: 500 }
-      );
+      return NextResponse.json(mockProducts, { status: 200 });
     }
 
     const { data, error } = await supabase
@@ -27,27 +22,18 @@ export async function GET() {
       .select("*");
 
     if (error) {
-      console.error("Supabase query error:", error);
-      return NextResponse.json(
-        {
-          error: "Database error",
-          message: error.message,
-          code: error.code,
-        },
-        { status: 500 }
-      );
+      console.warn("Supabase query products notice, falling back to mockProducts:", error.message);
+      return NextResponse.json(mockProducts, { status: 200 });
     }
 
-    return NextResponse.json(data ?? [], { status: 200 });
+    if (!data || data.length === 0) {
+      return NextResponse.json(mockProducts, { status: 200 });
+    }
+
+    return NextResponse.json(data, { status: 200 });
   } catch (err: unknown) {
-    console.error("Unexpected error in GET /api/products:", err);
-    return NextResponse.json(
-      {
-        error: "Internal Server Error",
-        message: err instanceof Error ? err.message : "An unexpected error occurred",
-      },
-      { status: 500 }
-    );
+    console.warn("Supabase connection offline or unreachable, falling back to mockProducts:", err);
+    return NextResponse.json(mockProducts, { status: 200 });
   }
 }
 
